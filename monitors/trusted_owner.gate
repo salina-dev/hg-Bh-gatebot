@@ -1,0 +1,47 @@
+// Trusted Owner Monitor (Gate)
+// Goal: Reduce noise by suppressing alerts when ownership changes to a trusted address.
+
+use Events, Contains, Len from hexagate;
+
+source contractAddress: address = 0xcd94a87696fac69edae3a70fe5725307ae1c43f6; // Blackhole Exchange smart contract address
+source trustedOwners: list<address> = list(
+  0xAFD356BC0dB2B5A0Dc879a2424eF384c0f266Fe9,
+  0xe3Df22b04F1F788fF025ADc2466638f5AaE588e0,
+  0xDA9977678d63FAd3d9Cd986aFb78eb7Ec53eAf07,
+  0x9E95eF7D8b87708641923C48C4eB298ED7CA6552 // to this address the ownership was transfered on 08/01/2025 13:05:17 (UTC+1) from number one address in the list
+);
+
+// Ownership events 
+source ownershipTransferredEvents: list<tuple<address, address>> = Events {
+    contract: contractAddress,
+    signature: "event OwnershipTransferred(address indexed previousOwner, address indexed newOwner)"
+};
+
+source ownershipTransferStartedEvents: list<tuple<address, address>> = Events {
+    contract: contractAddress,
+    signature: "event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner)"
+};
+
+// Extract untrusted new owners (ignore trusted)
+source untrustedTransferredNewOwners: list<address> = [
+    ev[1]
+    for ev in ownershipTransferredEvents
+    if !Contains { item: ev[1], sequence: trustedOwners }
+];
+
+source untrustedStartedNewOwners: list<address> = [
+    ev[1]
+    for ev in ownershipTransferStartedEvents
+    if !Contains { item: ev[1], sequence: trustedOwners }
+];
+
+// Alert only when there are untrusted changes
+rule {
+    description: "Untrusted ownership transfer detected: $untrustedTransferredNewOwners",
+    condition: Len { sequence: untrustedTransferredNewOwners } == 0
+};
+
+rule {
+    description: "Untrusted ownership transfer initiated: $untrustedStartedNewOwners",
+    condition: Len { sequence: untrustedStartedNewOwners } == 0
+};
