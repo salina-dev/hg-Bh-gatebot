@@ -1,0 +1,77 @@
+// Genesis Pool DoS (M-05) monitor
+// Detects when a pair with the same token tuple as a newly created Genesis Pool
+// is created and already holds non-zero token balances (possible griefing/DoS)
+
+use Events, HistoricalEvents, Call, Len, Range, Contains from hexagate;
+
+// Addresses to set in UI
+source genesisContract: address = 0xfa9514e4583eDFd27436cc35c477DcFE6F488d39; // first pool creator address https://snowtrace.io/address/0xdC660039Dd7F45F3AE4C1fCBF440b5CbAEE304BF?chainid=43114
+source pairFactory: address = 0xF16784dcAf838a3e16bEF7711a62D12413c39BD1; // ArenaFactory (pair factory) taken from logs of https://snowtrace.io/tx/0x78fa426cf0bd9b75a38446b46050df263117d46c64c10fb723d21572c4303421?chainid=43114
+
+// Events
+// All historical GenesisCreated events (optimized/cached in Hexagate infra)
+source genesisCreated: list<tuple<address, address, address, boolean, integer>> = HistoricalEvents {
+  contract: genesisContract,
+  signature: "event GenesisCreated(address indexed genesisPool, address indexed nativeToken, address indexed fundingToken, bool stable, uint256 auctionIndex)"
+};
+
+// Actual factory signature (no stable flag): PairCreated(token0, token1, pair, uint256)
+source pairCreated: list<tuple<address, address, address, integer>> = Events {
+  contract: pairFactory,
+  signature: "event PairCreated(address indexed token0, address indexed token1, address pair, uint256)"
+};
+
+// Precompute historical genesis token tuples
+source genesisPairs: list<tuple<address, address>> = [
+  tuple(evG[1], evG[2])
+  for evG in genesisCreated
+];
+
+// Match current-block pairs to any historical genesis (order-insensitive token match)
+// ev (PairCreated): ev[0]=token0; ev[1]=token1; ev[2]=pair address; ev[3]=pairCount
+source suspiciousTriplesA: list<tuple<address, address, address>> = [
+  tuple(ev[0], ev[1], ev[2])
+  for ev in pairCreated
+  if Contains { item: tuple(ev[0], ev[1]), sequence: genesisPairs }
+];
+
+source suspiciousTriplesB: list<tuple<address, address, address>> = [
+  tuple(ev[0], ev[1], ev[2])
+  for ev in pairCreated
+  if Contains { item: tuple(ev[1], ev[0]), sequence: genesisPairs }
+];
+
+// Compute non-zero balances per token leg separately (avoid OR in parser)
+source token0NonZeroA: list<address> = [
+  triple[2]
+  for triple in suspiciousTriplesA
+  if Call { contract: triple[0], signature: "function balanceOf(address) returns (uint256)", params: tuple(triple[2]) } > 0
+];
+
+source token1NonZeroA: list<address> = [
+  triple[2]
+  for triple in suspiciousTriplesA
+  if Call { contract: triple[1], signature: "function balanceOf(address) returns (uint256)", params: tuple(triple[2]) } > 0
+];
+
+source token0NonZeroB: list<address> = [
+  triple[2]
+  for triple in suspiciousTriplesB
+  if Call { contract: triple[0], signature: "function balanceOf(address) returns (uint256)", params: tuple(triple[2]) } > 0
+];
+
+source token1NonZeroB: list<address> = [
+  triple[2]
+  for triple in suspiciousTriplesB
+  if Call { contract: triple[1], signature: "function balanceOf(address) returns (uint256)", params: tuple(triple[2]) } > 0
+];
+
+// Invariant: there should be no such same-block pairs with non-zero balances
+rule {
+  description: "Potential Genesis Pool DoS: pairs with same tokens and non-zero balances",
+  condition:
+    (Len { sequence: token0NonZeroA } +
+     Len { sequence: token1NonZeroA } +
+     Len { sequence: token0NonZeroB } +
+     Len { sequence: token1NonZeroB }) == 0
+};
