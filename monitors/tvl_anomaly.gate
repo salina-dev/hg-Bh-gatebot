@@ -1,19 +1,11 @@
-// TVL Anomaly (draft) – monitors large balance drops in selected pools over a block window
+// TVL Anomaly – monitors large balance drops in selected pools over a block window
 
 use Call, Aggregate, PercentageDiff, Len, Range from hexagate;
 
-// Configure in UI:
-// - pairFactory: Arena/DEX factory to enumerate pairs
-// - topN: how many pairs to scan (use a modest cap to control cost)
-// - numBlocks: approximate time window in blocks (e.g., ~1800 for ~1h on Avalanche)
-// - drop thresholds
 source pairFactory: address = 0xF16784dcAf838a3e16bEF7711a62D12413c39BD1; // ArenaFactory
-source topN: integer = 50;                   // scan first N pairs
+source topN: integer = 50;                   // how many pairs to scan (scan first N pairs)
 source numBlocks: integer = 1800;            // ~1h on Avalanche
-source dropThreshold: integer = 10;        // 10% drop (standard)
-source criticalDropThreshold: integer = 40; // 40% drop (page immediately)
-source smallDropThreshold: integer = 10;    // count pairs with >=10% drop
-source minPairsDropping: integer = 3;       // if >=3 pairs drop, alert (blast radius)
+source dropThreshold: integer = 10;        // 10% drop
 
 // Enumerate pairs from factory
 source numPairs: integer = Call {
@@ -79,9 +71,9 @@ source balancesSeriesB: list<list<integer>> = [
 
 // First and last samples per series
 source firstBalancesA: list<integer> = [ series[0] for series in balancesSeriesA ];
-source lastBalancesA: list<integer> = [ series[numBlocks - 1] for series in balancesSeriesA ];
+source lastBalancesA: list<integer> = [ series[Len { sequence: series } - 1] for series in balancesSeriesA ];
 source firstBalancesB: list<integer> = [ series[0] for series in balancesSeriesB ];
-source lastBalancesB: list<integer> = [ series[numBlocks - 1] for series in balancesSeriesB ];
+source lastBalancesB: list<integer> = [ series[Len { sequence: series } - 1] for series in balancesSeriesB ];
 
 // Percentage difference per pair
 source percentageDropsA: list<integer> = [
@@ -107,7 +99,7 @@ source dropIndicesB: list<integer> = [
   if lastBalancesB[i] < firstBalancesB[i]
 ];
 
-// Pairs with drop exceeding thresholds
+// Pairs with drop exceeding threshold
 source anomalousPairsA: list<tuple<address, address>> = [
   monitoredPairsA[i]
   for i in dropIndicesA
@@ -123,40 +115,4 @@ source anomalousPairsB: list<tuple<address, address>> = [
 rule {
   description: "TVL anomaly: large drop detected for pairs $anomalousPairsA and $anomalousPairsB",
   condition: (Len { sequence: anomalousPairsA } + Len { sequence: anomalousPairsB }) == 0
-};
-
-// Critical drops (very large single-pair moves)
-source criticalPairsA: list<tuple<address, address>> = [
-  monitoredPairsA[i]
-  for i in dropIndicesA
-  if percentageDropsA[i] >= criticalDropThreshold
-];
-
-source criticalPairsB: list<tuple<address, address>> = [
-  monitoredPairsB[i]
-  for i in dropIndicesB
-  if percentageDropsB[i] >= criticalDropThreshold
-];
-
-rule {
-  description: "CRITICAL TVL drop (>=${criticalDropThreshold}%): $criticalPairsA $criticalPairsB",
-  condition: (Len { sequence: criticalPairsA } + Len { sequence: criticalPairsB }) == 0
-};
-
-// Many small/medium drops in parallel (blast-radius signal)
-source smallDropPairsA: list<tuple<address, address>> = [
-  monitoredPairsA[i]
-  for i in dropIndicesA
-  if percentageDropsA[i] >= smallDropThreshold
-];
-
-source smallDropPairsB: list<tuple<address, address>> = [
-  monitoredPairsB[i]
-  for i in dropIndicesB
-  if percentageDropsB[i] >= smallDropThreshold
-];
-
-rule {
-  description: "Multiple pairs dropped >=${smallDropThreshold}%: count=${Len { sequence: smallDropPairsA } + Len { sequence: smallDropPairsB }}",
-  condition: (Len { sequence: smallDropPairsA } + Len { sequence: smallDropPairsB }) < minPairsDropping
 };
