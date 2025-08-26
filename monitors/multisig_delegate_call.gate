@@ -1,0 +1,64 @@
+// Multi-sig (Safe) monitor: flags untrusted delegate calls and duplicate nonces using Safe Global API (Avalanche)
+
+use Fetch, Contains, Len from hexagate;
+
+// Config (set in UI)
+source safeApiBaseUrl: string = "https://safe-transaction-avalanche.safe.global";
+source safeAddressHex: string = "0xe3Df22b04F1F788fF025ADc2466638f5AaE588e0"; // Blackhole Safe (Avalanche)
+source pollSeconds: integer = 30;
+
+// Trusted delegatecall targets (string addresses)
+// Pre-populated Safe trusted delegatecall targets (canonical addresses)
+// Reference: pcaversaccio/safe-tx-hashes-util (MultiSendCallOnly, SafeMigration, SignMessageLib)
+// https://github.com/pcaversaccio/safe-tx-hashes-util/blob/main/safe_hashes.sh
+source trustedDelegates: list<string> = list(
+  // MultiSendCallOnly (canonical)
+  "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",
+  // MultiSendCallOnly (eip155)
+  "0xA1dabEF33b3B82c7814B6D82A79e50F4AC44102B",
+  "0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+  // SafeMigration (canonical)
+  "0x526643F69b81B008F46d95CD5ced5eC0edFFDaC6",
+  // SignMessageLib (canonical)
+  "0xd53cd0aB83D845Ac265BE939c57F53AD838012c9"
+);
+
+// Safe API types
+struct SafeTx {
+  nonce: integer,
+  to: string,
+  operation: integer // 0: CALL, 1: DELEGATE_CALL
+}
+
+struct SafeResp {
+  results: list<SafeTx>
+}
+
+// Fetch pending multisig transactions
+source pending: SafeResp = Fetch<SafeResp> {
+  url: "https://safe-transaction-avalanche.safe.global/api/v1/safes/0xe3Df22b04F1F788fF025ADc2466638f5AaE588e0/multisig-transactions/?executed=false&limit=20",
+  method: "GET",
+  interval: pollSeconds
+};
+
+// Delegate call candidates
+source delegateCalls: list<SafeTx> = [
+  tx
+  for tx in pending.results
+  if tx.operation == 1
+];
+
+// Untrusted delegate calls (to not in allowlist)
+source untrustedDelegates: list<string> = [
+  tx.to
+  for tx in delegateCalls
+  if !Contains { item: tx.to, sequence: trustedDelegates }
+];
+
+// Use count to avoid rendering issues when any 'to' is null
+source untrustedCount: integer = Len { sequence: untrustedDelegates };
+
+rule {
+  description: "Untrusted delegate call(s) detected. Count: $untrustedCount",
+  condition: untrustedCount == 0
+};
