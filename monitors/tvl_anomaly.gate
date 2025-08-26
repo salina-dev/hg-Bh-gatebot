@@ -1,118 +1,53 @@
-// TVL Anomaly – monitors large balance drops in selected pools over a block window
+// TVL Anomaly – single pair 
 
-use Call, Aggregate, PercentageDiff, Len, Range from hexagate;
+use Call, Aggregate, PercentageDiff, Len from hexagate;
 
-source pairFactory: address = 0xF16784dcAf838a3e16bEF7711a62D12413c39BD1; // ArenaFactory
-source topN: integer = 50;                   // how many pairs to scan (scan first N pairs)
-source numBlocks: integer = 1800;            // ~1h on Avalanche
-source dropThreshold: integer = 10;        // 10% drop
+// Single pair to monitor; tokens auto-derived from the pair
+source pair: address = 0x64D05ECC2cDc3e80D45BD1b25b0e8A7f7bf15cFc; // USDt/BLACK pair of Blackhole (0xcd94a87696fac69edae3a70fe5725307ae1c43f6)
+source numBlocks: integer = 120;   // rolling window
+source dropThreshold: integer = 10; // percent
 
-// Enumerate pairs from factory
-source numPairs: integer = Call {
-  contract: pairFactory,
-  signature: "function allPairsLength() view returns (uint256)"
+// Derive token0 and token1 from the pair
+source token0: address = Call { contract: pair, signature: "function token0() view returns (address)" };
+source token1: address = Call { contract: pair, signature: "function token1() view returns (address)" };
+
+// Aggregate token0 balance in the pair
+source balanceSeries0: list<integer> = Aggregate {
+  source: Call {
+    contract: token0,
+    signature: "function balanceOf(address) returns (uint256)",
+    params: tuple(pair)
+  },
+  blocks: numBlocks
 };
 
-source pairs: list<address> = [
-  Call {
-    contract: pairFactory,
-    signature: "function allPairs(uint256) view returns (address)",
-    params: tuple(i)
-  }
-  for i in Range { start: 0, stop: topN }
-];
+// Aggregate token1 balance in the pair
+source balanceSeries1: list<integer> = Aggregate {
+  source: Call {
+    contract: token1,
+    signature: "function balanceOf(address) returns (uint256)",
+    params: tuple(pair)
+  },
+  blocks: numBlocks
+};
 
-// For each pair, read token0/token1
-source token0s: list<address> = [
-  Call { contract: p, signature: "function token0() view returns (address)" }
-  for p in pairs
-];
+// First/last for each
+source first0: integer = balanceSeries0[0];
+source last0: integer = balanceSeries0[Len { sequence: balanceSeries0 } - 1];
+source first1: integer = balanceSeries1[0];
+source last1: integer = balanceSeries1[Len { sequence: balanceSeries1 } - 1];
 
-source token1s: list<address> = [
-  Call { contract: p, signature: "function token1() view returns (address)" }
-  for p in pairs
-];
+// Percent drops
+source dropPct0: integer = PercentageDiff { before: first0, after: last0 };
+source dropPct1: integer = PercentageDiff { before: first1, after: last1 };
 
-// Build (token, pair) tuples for both legs
-source monitoredPairsA: list<tuple<address, address>> = [
-  tuple(token0s[i], pairs[i])
-  for i in Range { start: 0, stop: topN }
-];
-
-source monitoredPairsB: list<tuple<address, address>> = [
-  tuple(token1s[i], pairs[i])
-  for i in Range { start: 0, stop: topN }
-];
-
-// Aggregate token balances for each (token, pair) over numBlocks
-source balancesSeriesA: list<list<integer>> = [
-  Aggregate {
-    source: Call {
-      contract: pair[0],
-      signature: "function balanceOf(address) returns (uint256)",
-      params: tuple(pair[1])
-    },
-    blocks: numBlocks
-  }
-  for pair in monitoredPairsA
-];
-
-source balancesSeriesB: list<list<integer>> = [
-  Aggregate {
-    source: Call {
-      contract: pair[0],
-      signature: "function balanceOf(address) returns (uint256)",
-      params: tuple(pair[1])
-    },
-    blocks: numBlocks
-  }
-  for pair in monitoredPairsB
-];
-
-// First and last samples per series
-source firstBalancesA: list<integer> = [ series[0] for series in balancesSeriesA ];
-source lastBalancesA: list<integer> = [ series[Len { sequence: series } - 1] for series in balancesSeriesA ];
-source firstBalancesB: list<integer> = [ series[0] for series in balancesSeriesB ];
-source lastBalancesB: list<integer> = [ series[Len { sequence: series } - 1] for series in balancesSeriesB ];
-
-// Percentage difference per pair
-source percentageDropsA: list<integer> = [
-  PercentageDiff { before: firstBalancesA[i], after: lastBalancesA[i] }
-  for i in Range { start: 0, stop: topN }
-];
-
-source percentageDropsB: list<integer> = [
-  PercentageDiff { before: firstBalancesB[i], after: lastBalancesB[i] }
-  for i in Range { start: 0, stop: topN }
-];
-
-// Indices where direction is a drop (last < first)
-source dropIndicesA: list<integer> = [
-  i
-  for i in Range { start: 0, stop: topN }
-  if lastBalancesA[i] < firstBalancesA[i]
-];
-
-source dropIndicesB: list<integer> = [
-  i
-  for i in Range { start: 0, stop: topN }
-  if lastBalancesB[i] < firstBalancesB[i]
-];
-
-// Pairs with drop exceeding threshold
-source anomalousPairsA: list<tuple<address, address>> = [
-  monitoredPairsA[i]
-  for i in dropIndicesA
-  if percentageDropsA[i] >= dropThreshold
-];
-
-source anomalousPairsB: list<tuple<address, address>> = [
-  monitoredPairsB[i]
-  for i in dropIndicesB
-  if percentageDropsB[i] >= dropThreshold
-];
+// Rules: alert if either token shows a drop >= threshold
+rule {
+  description: "TVL anomaly (token0): drop >= ${dropThreshold}% on pair $pair",
+  condition: (last0 >= first0) ? true : dropPct0 < dropThreshold
+};
 
 rule {
-  description: "TVL anomaly: large drop detected for pairs $anomalousPairsA and $anomalousPairsB",
-  condition: (Len { sequence: anomalousPairsA } + Len { sequence: anomalousPairsB }) == 0
+  description: "TVL anomaly (token1): drop >= ${dropThreshold}% on pair $pair",
+  condition: (last1 >= first1) ? true : dropPct1 < dropThreshold
 };
