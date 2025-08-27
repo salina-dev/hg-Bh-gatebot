@@ -1,0 +1,56 @@
+// Safe multisig duplicate nonce monitor (Avalanche)
+// Description:
+// - Purpose: detect high-confidence duplicate nonces among pending Safe multisig transactions to surface potential conflicts.
+// - Source: queries Safe Global Avalanche API for pending multisig txs every `pollSeconds` seconds.
+// - Logic: collects all nonces and alerts only when the same nonce appears >= `minPerNonce` times (default 3) to reduce noise
+//          from normal replacement flows where 2 txs may legitimately share a nonce.
+// - Noise control: tune `minPerNonce` (2 = sensitive, 3+ = quieter).
+// - JSON note: due to current Gatelang JSON/struct field access limitations in the UI, we restrict parsing to `nonce` only.
+//              We attempted rejection filtering (self-send to the Safe with value "0" and data "0x") and method/target decoding,
+//              but field access caused parser errors (e.g., "Cannot access field of string"). Once JSON parsing stabilizes,
+//              we can reintroduce: (1) rejection filtering, (2) operation/method decoding, (3) full target address context.
+
+use Fetch, Len from hexagate;
+
+// Configure in UI
+source safeAddressHex: string = "0xe3Df22b04F1F788fF025ADc2466638f5AaE588e0"; // Blackhole Safe (Avalanche)
+source pollSeconds: integer = 30; // fetch interval
+source minPerNonce: integer = 3; // alert only if >=3 txs share the same nonce
+
+// Fetch pending multisig transactions (typed for v2)
+struct SafeTx {
+  nonce: string
+}
+
+struct SafeResp {
+  results: list<SafeTx>
+}
+
+source pending: SafeResp = Fetch<SafeResp> {
+  url: "https://safe-transaction-avalanche.safe.global/api/v2/safes/0xe3Df22b04F1F788fF025ADc2466638f5AaE588e0/multisig-transactions/?executed=false&trusted=false&limit=20",
+  method: "GET",
+  interval: pollSeconds
+};
+
+// Extract nonces (strings in v2)
+source allNonces: list<string> = [
+  tx.nonce
+  for tx in pending.results
+];
+
+// Keep nonces that appear at least minPerNonce times
+source noisyNonces: list<string> = [
+  nonce
+  for nonce in allNonces
+  if Len { sequence: [ n for n in allNonces if n == nonce ] } >= minPerNonce
+];
+
+
+
+// Alert only on high-confidence duplicate nonce scenarios
+rule {
+  description: "Duplicate Safe nonces (>= $minPerNonce): $noisyNonces",
+  condition: Len { sequence: noisyNonces } == 0
+};
+
+
