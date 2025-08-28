@@ -1,0 +1,62 @@
+// Venus Liquidation Zero-Day Anomaly Monitor
+// Detects suspicious liquidation patterns indicating potential zero-day exploit activity.
+
+use Events, Len, Unique from hexagate;
+
+// BNB Chain Mainnet – Core Pool configuration
+source comptroller: address = 0xfD36E2c2a6789Db23113685031d7F16329158384; // Venus Core Pool Comptroller
+source oracle: address = 0x6592b5DE802159F3E74B2486b091D11a8256ab8A;      // Resilient Oracle (BNB Chain)
+// vToken monitored (start simple with vBNB)
+source vBNB: address = 0xA07c5b74C9B40447a954e1466938b865b6BBea36;
+source blocksPerMinute: integer = 20;            // BNB chain ~3s blocks
+source burstLiquidationsPerBlock: integer = 4;   // initial noise-minimizing threshold
+source burstUniqueBorrowersPerMin: integer = 6;  // initial noise-minimizing threshold
+source newLiquidatorAgeBlocks: integer = 200;    // ~10 minutes on BNB Chain
+
+// Common event signatures on Venus 
+// LiquidateBorrow(indexed liquidator, indexed borrower, repayAmount, vTokenCollateral, seizeTokens)
+source liq_vBNB: list<tuple<address, address, integer, address, integer>> = Events {
+  contract: vBNB,
+  signature: "event LiquidateBorrow(address indexed liquidator, address indexed borrower, uint256 repayAmount, address vTokenCollateral, uint256 seizeTokens)"
+};
+// (can be expanded for other markets monitoring (e.g. vBTC, vETH, vUSDT, vUSDC, vXVS))
+
+// Price update signal — proxy for oracle disturbances
+// Assumes oracle implements price update event: PriceUpdated(asset, newPrice)
+// If not available in a deployment, set oracle to 0x0 to disable
+source oraclePriceUpdates: list<tuple<address, integer>> = Events {
+  contract: oracle,
+  signature: "event PriceUpdated(address indexed asset, uint256 newPrice)"
+};
+
+// Liquidation count in current block (vBNB)
+source liqCountThisBlock: integer = Len { sequence: liq_vBNB };
+
+// Unique borrowers in current block (vBNB)
+source borrowersThisBlock: integer = Len { sequence: Unique { sequence: [ ev[1] for ev in liq_vBNB ] } };
+// Alias to accommodate UI parse quirks
+source rowersThisBlock: integer = borrowersThisBlock;
+
+// Unique liquidators in current block (vBNB)
+source uniqueLiquidatorsThisBlock: integer = Len { sequence: Unique { sequence: [ ev[0] for ev in liq_vBNB ] } };
+
+// Correlated oracle change and liquidation burst in the same block
+source oracleUpdatesThisBlock: integer = Len { sequence: oraclePriceUpdates };
+
+// Rules
+rule {
+  description: "Venus: liquidation burst per block >= {{burstLiquidationsPerBlock}} (potential exploit)",
+  condition: liqCountThisBlock < burstLiquidationsPerBlock
+};
+
+rule {
+  description: "Venus: >= {{burstUniqueBorrowersPerMin}} unique borrowers liquidated in a block",
+  condition: borrowersThisBlock < burstUniqueBorrowersPerMin
+};
+
+rule {
+  description: "Venus: multiple liquidators active in same block",
+  condition: uniqueLiquidatorsThisBlock <= 1
+};
+
+// Oracle coupling check can be introduced later. 
